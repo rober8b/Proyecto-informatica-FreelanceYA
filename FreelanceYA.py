@@ -1,8 +1,11 @@
 from flask import Flask, request, jsonify
+from werkzeug.security import generate_password_hash, check_password_hash
 import sqlite3
 import requests
 
+
 app = Flask(__name__)
+
 
 class Usuario:
     def __init__(self, id, nombre, email, rol):
@@ -18,6 +21,7 @@ class Usuario:
             'email': self.email,
             'rol': self.rol
         }
+
 
 class Servicio:
     def __init__(self, id, titulo, descripcion, precio, freelancer_id):
@@ -35,6 +39,7 @@ class Servicio:
             'precio': self.precio,
             'freelancer': self.freelancer_id
         }
+
 
 class Order:
     def __init__(self, id, nombre_servicio, nombre_usuario, nombre_freelancer, descripcion, precio):
@@ -63,7 +68,8 @@ def crear_tablas():
             CREATE TABLE IF NOT EXISTS usuarios (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 nombre TEXT,
-                email TEXT,
+                email TEXT UNIQUE,
+                password TEXT,
                 rol TEXT
             )
         ''')
@@ -89,8 +95,51 @@ def crear_tablas():
         ''')
 crear_tablas()
 
+
 def conectar_db():
     return sqlite3.connect("servicios.db")
+
+
+# ------------------ ENDPOINTS REGISTRO/LOGIN------------------
+@app.route('/registro', methods=['POST'])
+def registro():
+    data = request.get_json()
+    nombre = data['nombre']
+    email = data['email']
+    password = data['password']
+    rol = data['rol']
+
+    password_hash = generate_password_hash(password)
+
+    with conectar_db() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("INSERT INTO usuarios (nombre, email, password, rol) VALUES (?, ?, ?, ?)",
+                           (nombre, email, password_hash, rol))
+            conn.commit()
+            return jsonify({'mensaje': 'Usuario registrado correctamente'}), 201
+        except sqlite3.IntegrityError:
+            return jsonify({'error': 'El email ya está registrado'}), 400
+        
+        
+@app.route('/login', methods=['POST'])
+def login():
+    data = request.get_json()
+    email = data['email']
+    password = data['password']
+
+    with conectar_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, nombre, password, rol FROM usuarios WHERE email=?", (email,))
+        fila = cursor.fetchone()
+
+        if fila and check_password_hash(fila[2], password):
+            return jsonify({'mensaje': 'Login exitoso', 'usuario': {
+                'id': fila[0], 'nombre': fila[1], 'email': email, 'rol': fila[3]
+            }})
+        else:
+            return jsonify({'error': 'Credenciales inválidas'}), 401
+        
 
 # ------------------ ENDPOINTS USUARIOS ------------------
 @app.route('/usuarios', methods=['POST'])
@@ -120,8 +169,8 @@ def crear_servicio():
     data = request.get_json()
     with conectar_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("INSERT INTO servicios (titulo, descripcion, precio, freelancer) VALUES (?, ?, ?, ?)",
-                       (data['titulo'], data['descripcion'], data['precio'], data['freelancer']))
+        cursor.execute("INSERT INTO servicios (titulo, descripcion, precio, freelancer_id) VALUES (?, ?, ?, ?)",
+                       (data['titulo'], data['descripcion'], data['precio'], data['freelancer_id']))
         conn.commit()
     return jsonify({'mensaje': 'Servicio creado'}), 201
 
@@ -136,13 +185,37 @@ def listar_servicios():
     return jsonify(servicios)
 
 
+# ------------------ API PROPIA: BUSQUEDA POR PALABRA CLAVE ------------------
+@app.route('/servicios/buscar', methods=['GET'])
+def buscar_servicios():
+    palabra = request.args.get('q', '').lower()
+
+    with conectar_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM servicios")
+        filas = cursor.fetchall()
+        servicios = []
+
+        for f in filas:
+            if palabra in f[1].lower() or palabra in f[2].lower():
+                servicios.append({
+                    'id': f[0],
+                    'titulo': f[1],
+                    'descripcion': f[2],
+                    'precio': f[3],
+                    'freelancer': f[4]
+                })
+
+    return jsonify(servicios)
+
+
 @app.route('/servicios/<int:id>', methods=['PUT'])
 def actualizar_servicio(id):
     data = request.get_json()
     with conectar_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("UPDATE servicios SET titulo=?, descripcion=?, precio=?, freelancer=? WHERE id=?",
-                       (data['titulo'], data['descripcion'], data['precio'], data['freelancer'], id))
+        cursor.execute("UPDATE servicios SET titulo=?, descripcion=?, precio=?, freelancer_id=? WHERE id=?",
+                       (data['titulo'], data['descripcion'], data['precio'], data['freelancer_id'], id))
         conn.commit()
     return jsonify({'mensaje': 'Servicio actualizado'})
 
@@ -177,10 +250,14 @@ def listar_ordenes():
         ordenes = [{'id': f[0], 'nombre_servicio': f[1], 'nombre_usuario': f[2], 'nombre_freelancer': f[3], 'descripcion': f[4], 'precio': f[5]} for f in filas]
     return jsonify(ordenes)
 
+
 # ------------------ API DE TERCEROS: CONVERSOR MONEDAS ------------------
 @app.route('/convertir_multiples', methods=['GET'])
 def convertir_multiples_monedas():
-    monto = float(request.args.get('monto', 1))
+    try:
+        monto = float(request.args.get('monto', 1))
+    except ValueError:
+        return jsonify({'error': 'Monto inválido'}), 400
     monedas_destino = request.args.get('monedas_destino', 'EUR,ARS').upper().split(',')
 
     API_KEY = '4bb0171cf77f6601a51d2a59'
@@ -206,7 +283,8 @@ def convertir_multiples_monedas():
     except Exception as e:
         return jsonify({'error': 'No se pudo acceder a la API externa', 'detalle': str(e)}), 500
 
-
 # ------------------ MAIN ------------------
 if __name__ == '__main__':
     app.run(debug=True)
+
+
